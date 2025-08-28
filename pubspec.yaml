@@ -11,8 +11,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  google_sign_in: ^6.2.0
-  google_sign_in_platform_interface: ^2.4.3
+  google_sign_in: ^7.1.0
+  google_sign_in_platform_interface: ^3.0.0
   shared_preferences: ^2.2.2
   shared_preferences_foundation: ^2.3.4
   shared_preferences_linux: ^2.3.2
