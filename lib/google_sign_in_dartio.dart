@@ -111,10 +111,8 @@ class GoogleSignInDart extends platform.GoogleSignInPlatform {
       _hostedDomain = params.hostedDomain;
     }
 
-    // Use provided scopes if any, otherwise default to openid, email, profile
-    _scopes = (params.scopes != null && params.scopes!.isNotEmpty)
-        ? params.scopes!
-        : const <String>['openid', 'email', 'profile'];
+    // Default scopes if none provided
+    _scopes = const <String>['openid', 'email', 'profile'];
     _initFromStore();
   }
 
