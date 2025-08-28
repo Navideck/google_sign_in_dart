@@ -201,9 +201,19 @@ class GoogleSignInDart extends platform.GoogleSignInPlatform {
   }
 
   @override
+  /// Indicates whether authorization requires explicit user interaction.
+  ///
+  /// In general, browser-based OAuth flows may not always require user interaction,
+  /// as tokens can sometimes be cached or refreshed silently without prompting the user.
+  /// However, in this implementation, we always require user interaction because:
+  ///   - We do not support silent token refresh or caching of tokens that would allow
+  ///     re-authentication without user involvement.
+  ///   - Each authentication attempt initiates a new browser-based OAuth flow.
+  ///
+  /// If support for silent authentication or token caching is added in the future,
+  /// this method's behavior and documentation should be updated accordingly.
+  @override
   bool authorizationRequiresUserInteraction() {
-    // For this implementation, authorization always requires user interaction
-    // since we use browser-based OAuth flows
     return true;
   }
 
