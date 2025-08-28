@@ -8,7 +8,6 @@ import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
-import 'package:google_sign_in/google_sign_in.dart';
 import 'package:google_sign_in_platform_interface/google_sign_in_platform_interface.dart'
     as platform;
 import 'package:http/http.dart';
@@ -91,7 +90,8 @@ class GoogleSignInDart extends platform.GoogleSignInPlatform {
   late List<String> _scopes;
   String? _hostedDomain;
 
-  platform.GoogleSignInTokenData? _tokenData;
+  String? _accessToken;
+  String? _idToken;
   String? _refreshToken;
   DateTime? _expiresAt;
 
@@ -103,136 +103,226 @@ class GoogleSignInDart extends platform.GoogleSignInPlatform {
   UrlPresenter presenter;
 
   @override
-  Future<void> init({
-    String? hostedDomain,
-    List<String> scopes = const <String>[],
-    platform.SignInOption signInOption = platform.SignInOption.standard,
-    String? clientId,
-  }) async {
-    assert(clientId == null || clientId == _clientId,
-        'ClientID ($clientId) does not match the one used to register the plugin $_clientId.');
-    assert(
-        !scopes.any((String scope) => scope.contains(' ')),
-        'OAuth 2.0 Scopes for Google APIs can\'t contain spaces.'
-        'Check https://developers.google.com/identity/protocols/googlescopes '
-        'for a list of valid OAuth 2.0 scopes.');
+  Future<void> init(platform.InitParameters params) async {
+    assert(params.clientId == null || params.clientId == _clientId,
+        'ClientID (${params.clientId}) does not match the one used to register the plugin $_clientId.');
 
-    if (scopes.isEmpty) {
-      _scopes = const <String>['openid', 'email', 'profile'];
-    } else {
-      _scopes = scopes;
+    if (params.hostedDomain != null) {
+      _hostedDomain = params.hostedDomain;
     }
-    _hostedDomain = hostedDomain;
+
+    // Default scopes if none provided
+    _scopes = const <String>['openid', 'email', 'profile'];
     _initFromStore();
   }
 
   @override
-  Future<platform.GoogleSignInUserData?> signInSilently() async {
-    if (_haveValidToken) {
-      return _storage.userData;
-    } else if (_refreshToken != null) {
-      try {
-        await _doTokenRefresh();
-        return _storage.userData;
-      } catch (e) {
-        throw PlatformException(
-            code: GoogleSignIn.kSignInFailedError, message: e.toString());
+  Future<platform.AuthenticationResults?>? attemptLightweightAuthentication(
+      platform.AttemptLightweightAuthenticationParameters params) async {
+    // This method attempts to sign in without explicit user intent
+    // We'll try to use existing tokens if available, similar to signInSilently
+    try {
+      if (_haveValidToken) {
+        final userData = _storage.userData;
+        if (userData != null) {
+          return platform.AuthenticationResults(
+            user: userData,
+            authenticationTokens: platform.AuthenticationTokenData(
+              idToken: _idToken,
+            ),
+          );
+        }
+      } else if (_refreshToken != null) {
+        try {
+          await _doTokenRefresh();
+          final userData = _storage.userData;
+          if (userData != null) {
+            return platform.AuthenticationResults(
+              user: userData,
+              authenticationTokens: platform.AuthenticationTokenData(
+                idToken: _idToken,
+              ),
+            );
+          }
+        } catch (e) {
+          // Silent failure for lightweight authentication
+          return null;
+        }
       }
+      return null;
+    } catch (e) {
+      // Silent failure for lightweight authentication
+      return null;
     }
-
-    throw PlatformException(code: GoogleSignIn.kSignInRequiredError);
   }
 
   @override
-  Future<platform.GoogleSignInUserData?> signIn() async {
+  Future<platform.AuthenticationResults> authenticate(
+      platform.AuthenticateParameters params) async {
+    // This method signs in with explicit user intent
+    // Similar to the existing signIn method but returns AuthenticationResults
     if (_haveValidToken) {
-      final platform.GoogleSignInUserData? userData = _storage.userData;
+      final userData = _storage.userData;
       if (userData == null) {
         await _fetchUserProfile();
       }
-      return _storage.userData;
+      final finalUserData = _storage.userData;
+      if (finalUserData == null) {
+        throw platform.GoogleSignInException(
+          code: platform.GoogleSignInExceptionCode.unknownError,
+          description: 'Failed to fetch user profile',
+        );
+      }
+      return platform.AuthenticationResults(
+        user: finalUserData,
+        authenticationTokens: platform.AuthenticationTokenData(
+          idToken: _idToken,
+        ),
+      );
     } else {
-      await _performSignIn(_scopes);
-      return _storage.userData;
+      // Use scope hint if provided, otherwise use default scopes
+      final scopesToUse =
+          params.scopeHint.isNotEmpty ? params.scopeHint : _scopes;
+      await _performSignIn(scopesToUse);
+      final userData = _storage.userData;
+      if (userData == null) {
+        throw platform.GoogleSignInException(
+          code: platform.GoogleSignInExceptionCode.unknownError,
+          description: 'Failed to fetch user profile after sign in',
+        );
+      }
+      return platform.AuthenticationResults(
+        user: userData,
+        authenticationTokens: platform.AuthenticationTokenData(
+          idToken: _idToken,
+        ),
+      );
     }
   }
 
   @override
-  Future<platform.GoogleSignInTokenData> getTokens(
-      {required String email, bool? shouldRecoverAuth = true}) async {
-    if (_haveValidToken) {
-      return _tokenData!;
-    } else if (_refreshToken != null) {
-      // if refreshing the token fails, and shouldRecoverAuth is true, then we
-      // will prompt the user to login again
-      try {
-        await _doTokenRefresh();
-        return _tokenData!;
-      } catch (_) {}
-    }
-
-    if (shouldRecoverAuth ?? true) {
-      await _performSignIn(_scopes);
-      return _tokenData!;
-    } else {
-      throw PlatformException(
-          code: GoogleSignInAccount.kUserRecoverableAuthError);
-    }
+  bool authorizationRequiresUserInteraction() {
+    // For this implementation, authorization always requires user interaction
+    // since we use browser-based OAuth flows
+    return true;
   }
 
   @override
-  Future<void> signOut() async {
+  Future<platform.ClientAuthorizationTokenData?>
+      clientAuthorizationTokensForScopes(
+          platform.ClientAuthorizationTokensForScopesParameters params) async {
+    final request = params.request;
+
+    // Check if we have valid tokens for the requested scopes
+    if (_haveValidToken &&
+        request.scopes.every((scope) => _storage.scopes.contains(scope))) {
+      return platform.ClientAuthorizationTokenData(
+        accessToken: _accessToken!,
+      );
+    }
+
+    // If we don't have the required scopes and can't prompt, return null
+    if (!request.promptIfUnauthorized) {
+      return null;
+    }
+
+    // Check if the user matches the requested user
+    if (request.userId != null || request.email != null) {
+      final currentUser = _storage.userData;
+      if (currentUser == null) {
+        return null;
+      }
+
+      if (request.userId != null && currentUser.id != request.userId) {
+        return null;
+      }
+
+      if (request.email != null && currentUser.email != request.email) {
+        return null;
+      }
+    }
+
+    // Request the required scopes
+    try {
+      await _performSignIn(request.scopes);
+      if (_haveValidToken) {
+        return platform.ClientAuthorizationTokenData(
+          accessToken: _accessToken!,
+        );
+      }
+    } catch (e) {
+      throw platform.GoogleSignInException(
+        code: platform.GoogleSignInExceptionCode.unknownError,
+        description: e.toString(),
+      );
+    }
+
+    return null;
+  }
+
+  @override
+  Future<platform.ServerAuthorizationTokenData?>
+      serverAuthorizationTokensForScopes(
+          platform.ServerAuthorizationTokensForScopesParameters params) async {
+    final request = params.request;
+
+    // Check if we have valid tokens for the requested scopes
+    if (_haveValidToken &&
+        request.scopes.every((scope) => _storage.scopes.contains(scope))) {
+      // For server authorization, we need to check if we have a server auth code
+      // This implementation doesn't currently support server auth codes
+      // Return null to indicate we need to prompt for authorization
+      return null;
+    }
+
+    // If we can't prompt, return null
+    if (!request.promptIfUnauthorized) {
+      return null;
+    }
+
+    // Check if the user matches the requested user
+    if (request.userId != null || request.email != null) {
+      final currentUser = _storage.userData;
+      if (currentUser == null) {
+        return null;
+      }
+
+      if (request.userId != null && currentUser.id != request.userId) {
+        return null;
+      }
+
+      if (request.email != null && currentUser.email != request.email) {
+        return null;
+      }
+    }
+
+    // This implementation doesn't support server authorization tokens
+    // Return null to indicate the feature is not supported
+    return null;
+  }
+
+  @override
+  bool supportsAuthenticate() {
+    // This implementation supports the authenticate method
+    return true;
+  }
+
+  @override
+  Future<void> signOut(platform.SignOutParams params) async {
     _storage.clearAll();
     _initFromStore();
   }
 
   @override
-  Future<void> disconnect() async {
+  Future<void> disconnect(platform.DisconnectParams params) async {
     await _revokeToken();
     _storage.clear();
     _initFromStore();
-  }
-
-  @override
-  Future<bool> isSignedIn() async {
-    if (_haveValidToken) {
-      return true;
-    } else if (_refreshToken != null) {
-      try {
-        await _doTokenRefresh();
-        return _haveValidToken;
-      } catch (_) {}
-    }
-
-    return false;
-  }
-
-  @override
-  Future<void> clearAuthCache({String? token}) async {
-    await _revokeToken();
-    _storage.clear();
-    _initFromStore();
-  }
-
-  @override
-  Future<bool> requestScopes(List<String> scopes) async {
-    List<String> grantedScopes = _storage.scopes;
-    final List<String> missingScopes =
-        scopes.where((String scope) => !grantedScopes.contains(scope)).toList();
-
-    if (missingScopes.isEmpty) {
-      return true;
-    }
-
-    await _performSignIn(missingScopes);
-
-    grantedScopes = _storage.scopes;
-    return scopes.every((String scope) => grantedScopes.contains(scope));
   }
 
   Future<void> _revokeToken() async {
     if (_haveValidToken) {
-      final String? token = _tokenData!.accessToken;
+      final String? token = _accessToken;
 
       await get(
         Uri.parse('https://oauth2.googleapis.com/revoke?token=$token'),
@@ -245,7 +335,7 @@ class GoogleSignInDart extends platform.GoogleSignInPlatform {
 
   Future<void> _fetchUserProfile() async {
     if (_haveValidToken) {
-      final String token = _tokenData!.accessToken!;
+      final String token = _accessToken!;
       final Response response = await get(
         Uri.parse('https://openidconnect.googleapis.com/v1/userinfo'),
         headers: <String, String>{
@@ -255,11 +345,11 @@ class GoogleSignInDart extends platform.GoogleSignInPlatform {
 
       if (response.statusCode > 300) {
         if (response.statusCode == 401) {
-          await signOut();
+          await signOut(platform.SignOutParams());
         }
-        throw PlatformException(
-          code: GoogleSignInAccount.kFailedToRecoverAuthError,
-          message: response.body,
+        throw platform.GoogleSignInException(
+          code: platform.GoogleSignInExceptionCode.unknownError,
+          description: response.body,
         );
       }
 
@@ -298,9 +388,9 @@ class GoogleSignInDart extends platform.GoogleSignInPlatform {
 
     final Map<String, dynamic> result = await future.catchError(
       (dynamic error, StackTrace s) {
-        throw PlatformException(
-          code: GoogleSignInAccount.kFailedToRecoverAuthError,
-          message: error.toString(),
+        throw platform.GoogleSignInException(
+          code: platform.GoogleSignInExceptionCode.unknownError,
+          description: error.toString(),
         );
       },
     );
@@ -337,6 +427,7 @@ class GoogleSignInDart extends platform.GoogleSignInPlatform {
   void _initFromStore() {
     _refreshToken = _storage.refreshToken;
     _expiresAt = _storage.expiresAt;
-    _tokenData = _storage.tokenData;
+    _accessToken = _storage.accessToken;
+    _idToken = _storage.idToken;
   }
 }
