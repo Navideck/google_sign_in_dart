@@ -43,7 +43,6 @@ class SignInDemo extends StatefulWidget {
 }
 
 class SignInDemoState extends State<SignInDemo> {
-  late StreamSubscription<AuthenticationEvent?> sub;
   late AuthClient _client;
   GoogleSignInUserData? _currentUser;
   String? _contactText;
