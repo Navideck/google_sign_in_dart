@@ -7,29 +7,23 @@
 import 'dart:async';
 
 import 'package:collection/collection.dart';
-import 'package:extension_google_sign_in_as_googleapis_auth/extension_google_sign_in_as_googleapis_auth.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:google_sign_in/google_sign_in.dart';
+import 'package:google_sign_in_platform_interface/google_sign_in_platform_interface.dart';
 import 'package:google_sign_in_dartio/google_sign_in_dartio.dart';
 import 'package:googleapis/gmail/v1.dart';
 import 'package:googleapis/people/v1.dart';
 import 'package:googleapis_auth/googleapis_auth.dart';
 import 'package:html_unescape/html_unescape.dart';
+import 'package:http/http.dart' as http;
 
 import 'platform_js.dart' if (dart.library.io) 'platform_io.dart';
-
-GoogleSignIn _googleSignIn = GoogleSignIn(scopes: <String>[
-  'email',
-  'profile',
-  PeopleServiceApi.contactsReadonlyScope
-]);
 
 Future<void> main() async {
   if (isDesktop) {
     await GoogleSignInDart.register(
-      exchangeEndpoint:
-          'https://us-central1-flutter-sdk.cloudfunctions.net/authHandler',
+      // Comment out the exchange endpoint to use token-based flow for testing
+      // exchangeEndpoint:
+      //     'https://us-central1-flutter-sdk.cloudfunctions.net/authHandler',
       clientId:
           '233259864964-go57eg1ones74e03adlqvbtg2av6tivb.apps.googleusercontent.com',
     );
@@ -37,7 +31,7 @@ Future<void> main() async {
 
   runApp(
     MaterialApp(
-      title: 'Google Sign In',
+      title: 'Google Sign In Dart',
       home: SignInDemo(),
     ),
   );
@@ -49,136 +43,212 @@ class SignInDemo extends StatefulWidget {
 }
 
 class SignInDemoState extends State<SignInDemo> {
-  late StreamSubscription<GoogleSignInAccount?> sub;
   late AuthClient _client;
-  GoogleSignInAccount? _currentUser;
+  GoogleSignInUserData? _currentUser;
   String? _contactText;
   String? _emailText;
 
   @override
   void initState() {
     super.initState();
-    sub = _googleSignIn.onCurrentUserChanged.listen(_onUserChanged);
     _test();
   }
 
   Future<void> _test() async {
-    final GoogleSignInAccount? result = await _googleSignIn.signInSilently();
-    print('result: $result');
-  }
-
-  Future<void> _onUserChanged(GoogleSignInAccount? account) async {
-    setState(() => _currentUser = account);
-    if (_currentUser != null) {
-      _client = (await _googleSignIn.authenticatedClient())!;
-      await _handleGetContact();
+    try {
+      // Use the new API to attempt lightweight authentication
+      final result =
+          await GoogleSignInPlatform.instance.attemptLightweightAuthentication(
+        AttemptLightweightAuthenticationParameters(),
+      );
+      if (result != null) {
+        print('Lightweight auth result: ${result.user.email}');
+        setState(() {
+          _currentUser = result.user;
+        });
+        await _handleGetContact();
+      }
+    } catch (e) {
+      print('Lightweight auth failed: $e');
     }
   }
 
   Future<void> _handleGetContact() async {
+    if (_currentUser == null) return;
+
     setState(() => _contactText = 'Loading contact info...');
 
-    final PeopleConnectionsResource connectionsApi =
-        PeopleServiceApi(_client).people.connections;
-
-    final ListConnectionsResponse listResult = await connectionsApi.list(
-      'people/me',
-      requestMask_includeField: 'person.names',
-    );
-
-    String? contact;
-    final List<Person>? connections = listResult.connections;
-    if (connections != null && connections.isNotEmpty) {
-      connections.shuffle();
-      final Person? person = connections //
-          .where((Person person) => person.names != null)
-          .firstWhereOrNull(
-        (Person person) {
-          return person.names! //
-              .any((Name name) => name.displayName != null);
-        },
+    try {
+      // Get client authorization tokens for People API
+      final tokenData = await GoogleSignInPlatform.instance
+          .clientAuthorizationTokensForScopes(
+        ClientAuthorizationTokensForScopesParameters(
+          request: AuthorizationRequestDetails(
+            scopes: ['https://www.googleapis.com/auth/user.emails.read'],
+            userId: _currentUser!.id,
+            email: _currentUser!.email,
+            promptIfUnauthorized: false,
+          ),
+        ),
       );
 
-      if (person != null) {
-        final Name? name = person.names!
-            .firstWhereOrNull((Name name) => name.displayName != null);
-        contact = name?.displayName;
-      }
-    }
+      if (tokenData != null) {
+        // Create an AuthClient from the access token
+        final credentials = AccessCredentials(
+          AccessToken('Bearer', tokenData.accessToken,
+              DateTime.now().add(Duration(hours: 1))),
+          null,
+          ['https://www.googleapis.com/auth/user.emails.read'],
+        );
+        _client = authenticatedClient(http.Client(), credentials);
 
-    setState(() {
-      if (contact != null) {
-        _contactText = contact;
+        final PeopleConnectionsResource connectionsApi =
+            PeopleServiceApi(_client).people.connections;
+
+        final ListConnectionsResponse listResult = await connectionsApi.list(
+          'people/me',
+          requestMask_includeField: 'person.names',
+        );
+
+        String? contact;
+        final List<Person>? connections = listResult.connections;
+        if (connections != null && connections.isNotEmpty) {
+          connections.shuffle();
+          final Person? person = connections //
+              .where((Person person) => person.names != null)
+              .firstWhereOrNull(
+            (Person person) {
+              return person.names! //
+                  .any((Name name) => name.displayName != null);
+            },
+          );
+
+          if (person != null) {
+            final Name? name = person.names!
+                .firstWhereOrNull((Name name) => name.displayName != null);
+            contact = name?.displayName;
+          }
+        }
+
+        setState(() {
+          if (contact != null) {
+            _contactText = contact;
+          } else {
+            _contactText = 'No contacts to display.';
+          }
+        });
       } else {
-        _contactText = 'No contacts to display.';
+        setState(() {
+          _contactText = 'No authorization for People API.';
+        });
       }
-    });
+    } catch (e) {
+      setState(() {
+        _contactText = 'Failed to load contacts: $e';
+      });
+    }
   }
 
   Future<void> _handleGetEmail() async {
+    if (_currentUser == null) return;
+
     setState(() => _emailText = 'Loading emails...');
 
-    final bool granted = await _googleSignIn
-        .requestScopes(<String>[GmailApi.gmailReadonlyScope]);
+    try {
+      // Use the new API to request Gmail scope
+      final tokenData = await GoogleSignInPlatform.instance
+          .clientAuthorizationTokensForScopes(
+        ClientAuthorizationTokensForScopesParameters(
+          request: AuthorizationRequestDetails(
+            scopes: [GmailApi.gmailReadonlyScope],
+            userId: _currentUser!.id,
+            email: _currentUser!.email,
+            promptIfUnauthorized: true,
+          ),
+        ),
+      );
 
-    if (!granted) {
-      setState(() => _emailText = 'Gmail scope was not granted by the user.');
-      return;
-    }
+      if (tokenData == null) {
+        setState(() => _emailText = 'Gmail scope was not granted by the user.');
+        return;
+      }
 
-    _client = (await _googleSignIn.authenticatedClient())!;
-    final UsersMessagesResource messagesApi = GmailApi(_client).users.messages;
+      // Create an AuthClient from the access token
+      final credentials = AccessCredentials(
+        AccessToken('Bearer', tokenData.accessToken,
+            DateTime.now().add(Duration(hours: 1))),
+        null,
+        [GmailApi.gmailReadonlyScope],
+      );
+      _client = authenticatedClient(http.Client(), credentials);
 
-    final ListMessagesResponse listResult = await messagesApi.list('me');
+      final UsersMessagesResource messagesApi =
+          GmailApi(_client).users.messages;
 
-    String? messageSnippet;
-    if (listResult.messages != null && listResult.messages!.isNotEmpty) {
-      for (Message message in listResult.messages!..shuffle()) {
-        message = await messagesApi.get('me', '${message.id}', format: 'FULL');
-        final String? snippet = message.snippet;
-        if (snippet != null && snippet.trim().isNotEmpty) {
-          messageSnippet = HtmlUnescape().convert(snippet);
-          break;
+      final ListMessagesResponse listResult = await messagesApi.list('me');
+
+      String? messageSnippet;
+      if (listResult.messages != null && listResult.messages!.isNotEmpty) {
+        for (Message message in listResult.messages!..shuffle()) {
+          message =
+              await messagesApi.get('me', '${message.id}', format: 'FULL');
+          final String? snippet = message.snippet;
+          if (snippet != null && snippet.trim().isNotEmpty) {
+            messageSnippet = HtmlUnescape().convert(snippet);
+            break;
+          }
         }
       }
-    }
 
-    setState(() {
-      if (messageSnippet != null) {
-        _emailText = messageSnippet;
-      } else {
-        _emailText = 'No contacts to display.';
-      }
-    });
+      setState(() {
+        if (messageSnippet != null) {
+          _emailText = messageSnippet;
+        } else {
+          _emailText = 'No emails to display.';
+        }
+      });
+    } catch (e) {
+      setState(() {
+        _emailText = 'Failed to load emails: $e';
+      });
+    }
   }
 
   Future<void> _handleSignIn() async {
     try {
-      await _googleSignIn.signIn();
+      // Use the new authenticate method
+      final result = await GoogleSignInPlatform.instance.authenticate(
+        AuthenticateParameters(scopeHint: ['email', 'profile']),
+      );
+
+      setState(() {
+        _currentUser = result.user;
+      });
+
+      await _handleGetContact();
     } catch (error) {
-      print(error);
+      print('Sign in failed: $error');
     }
   }
 
   void _handleSignOut() {
-    _googleSignIn.disconnect();
-  }
-
-  @override
-  void dispose() {
-    sub.cancel();
-    super.dispose();
+    GoogleSignInPlatform.instance.signOut(SignOutParams());
+    setState(() {
+      _currentUser = null;
+      _contactText = null;
+      _emailText = null;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Google Sign In'),
+        title: const Text('Google Sign In Dart'),
       ),
       body: Builder(
         builder: (BuildContext context) {
-          final GoogleSignInAccount? currentUser = _currentUser;
+          final GoogleSignInUserData? currentUser = _currentUser;
           final String? contactText = _contactText;
           final String? emailText = _emailText;
 
@@ -202,16 +272,12 @@ class SignInDemoState extends State<SignInDemo> {
           return ListView(
             children: <Widget>[
               ListTile(
-                leading: kIsWeb
-                    ? GoogleUserCircleAvatar(
-                        identity: currentUser,
-                      )
-                    : ClipOval(
-                        child: Image.network(
-                          currentUser.photoUrl ??
-                              'https://lh3.googleusercontent.com/a/default-user=s160-c',
-                        ),
-                      ),
+                leading: ClipOval(
+                  child: Image.network(
+                    currentUser.photoUrl ??
+                        'https://lh3.googleusercontent.com/a/default-user=s160-c',
+                  ),
+                ),
                 title: Text(currentUser.displayName ?? ''),
                 subtitle: Text(currentUser.email),
               ),
@@ -233,7 +299,7 @@ class SignInDemoState extends State<SignInDemo> {
                   ),
                   subtitle: const Text('Gmail Api'),
                 ),
-              ButtonBar(
+              OverflowBar(
                 children: <Widget>[
                   TextButton(
                     onPressed: _handleSignOut,
@@ -242,7 +308,6 @@ class SignInDemoState extends State<SignInDemo> {
                   TextButton(
                     onPressed: () {
                       _handleGetContact();
-                      // _handleGetEmail();
                     },
                     child: const Text('REFRESH'),
                   ),

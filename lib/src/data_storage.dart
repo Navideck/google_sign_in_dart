@@ -63,19 +63,8 @@ class DataStorage {
   set refreshToken(String? value) => _setValue(_kRefreshTokenKey, value);
 
   /// Retrieve the authentication data after sign in.
-  platform.GoogleSignInTokenData? get tokenData {
-    if (idToken != null || accessToken != null) {
-      return platform.GoogleSignInTokenData(
-          idToken: idToken, accessToken: accessToken);
-    }
-
-    return null;
-  }
-
-  set tokenData(platform.GoogleSignInTokenData? data) {
-    idToken = data?.idToken;
-    accessToken = data?.accessToken;
-  }
+  /// This method is no longer used in the new API structure.
+  /// Access tokens and ID tokens are now stored separately.
 
   /// Save the scopes that we were granted access to in the last authorization.
   ///
@@ -141,7 +130,6 @@ class DataStorage {
         displayName: _store.get(_getKey(_kNameKey)),
         email: _store.get(_getKey(_kEmailKey))!,
         photoUrl: _store.get(_getKey(_kPictureKey)),
-        idToken: idToken,
       );
     }
 
